@@ -1,0 +1,28 @@
+{
+  "name": "@agenzio/ai-teams-bridge",
+  "version": "0.1.0",
+  "description": "Local bridge that connects AI Teams chat to Claude Code on your machine",
+  "bin": {
+    "ai-teams-bridge": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js start",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
+    "commander": "^12.1.0",
+    "firebase": "^11.0.0",
+    "keytar": "^7.9.0",
+    "open": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
