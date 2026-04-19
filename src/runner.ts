@@ -122,6 +122,7 @@ async function handlePrompt(
     if (msg.type === 'assistant' && msg.message?.content) {
       for (const c of msg.message.content) {
         if (c.type === 'text' && typeof c.text === 'string') {
+          process.stdout.write(c.text);
           buffer.push(c.text);
         }
       }
@@ -135,6 +136,7 @@ async function handlePrompt(
   }
 
   const fullText = buffer.join('').trim();
+  if (fullText) process.stdout.write('\n');
   if (fullText) {
     await publishMessage(db, cmd, redactSecrets(fullText), 'claude-output');
   } else if (abort.signal.aborted) {

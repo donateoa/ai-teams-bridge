@@ -6,6 +6,8 @@ loadDotenv({ path: path.join(__dirname, '..', '.env') });
 import { Command } from 'commander';
 import { loginCommand } from './commands/login';
 import { logoutCommand } from './commands/logout';
+import { openCommand } from './commands/open';
+import { sessionsCommand } from './commands/sessions';
 import { startCommand } from './commands/start';
 import { statusCommand } from './commands/status';
 
@@ -52,6 +54,25 @@ program
   .description('Mostra stato del bridge: config, login, sessioni')
   .action(async () => {
     await statusCommand();
+  });
+
+program
+  .command('sessions')
+  .description('Elenca le sessioni Claude attive (una per chat)')
+  .action(() => {
+    sessionsCommand();
+  });
+
+program
+  .command('open <chatId>')
+  .description('Apre una sessione Claude interattiva nel terminale (resume)')
+  .action(async (chatId: string) => {
+    try {
+      await openCommand(chatId);
+    } catch (e: any) {
+      console.error('Errore:', e.message ?? e);
+      process.exit(1);
+    }
   });
 
 program.parseAsync(process.argv).catch((e) => {
