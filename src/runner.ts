@@ -100,6 +100,7 @@ async function handlePrompt(
   if (!cmd.prompt || !cmd.workdir) {
     throw new Error('prompt o workdir mancante');
   }
+  console.log(`[runner] prompt="${cmd.prompt.slice(0, 80)}" workdir="${cmd.workdir}"`);
 
   const resumeId = getSessionId(cmd.chatId);
   const abort = new AbortController();
