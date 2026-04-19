@@ -3,7 +3,11 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
+  getDocs,
   increment,
+  orderBy,
+  query,
   runTransaction,
   serverTimestamp,
   updateDoc,
@@ -92,6 +96,39 @@ async function finalizeCommand(
   activeRuns.delete(commandId);
 }
 
+async function buildContextPrompt(db: Firestore, cmd: CommandDoc): Promise<string> {
+  const chatSnap = await getDoc(doc(db, 'chats', cmd.chatId));
+  const chat = chatSnap.data() as any;
+  const title: string = chat?.title ?? cmd.chatId;
+  const members: Record<string, string> = {};
+  for (const [uid, m] of Object.entries(chat?.members ?? {})) {
+    const member = m as any;
+    members[uid] = member.displayName || member.email || uid;
+  }
+
+  const msgsSnap = await getDocs(
+    query(collection(db, `chats/${cmd.chatId}/messages`), orderBy('ts', 'asc')),
+  );
+
+  const lines: string[] = [];
+  for (const d of msgsSnap.docs) {
+    const m = d.data() as any;
+    if (m.kind === 'claude-system' || m.kind === 'claude-error') continue;
+    const ts: Date = m.ts?.toDate?.() ?? new Date();
+    const timeStr = ts.toLocaleString('it-IT', { dateStyle: 'short', timeStyle: 'short' });
+    if (m.kind === 'claude-output') {
+      lines.push(`[${timeStr}] Claude: ${m.text}`);
+    } else {
+      const name = members[m.senderUid] ?? m.senderUid;
+      lines.push(`[${timeStr}] ${name}: ${m.text}`);
+    }
+  }
+
+  if (lines.length === 0) return cmd.prompt!;
+
+  return `Conversazione nella chat "${title}":\n\n${lines.join('\n')}\n\n---\nNuovo messaggio: ${cmd.prompt}`;
+}
+
 async function handlePrompt(
   db: Firestore,
   config: BridgeConfig,
@@ -106,6 +143,8 @@ async function handlePrompt(
   const abort = new AbortController();
   activeRuns.set(cmd.id, abort);
 
+  const prompt = resumeId ? cmd.prompt : await buildContextPrompt(db, cmd);
+
   const options: Record<string, unknown> = {
     cwd: cmd.workdir,
     permissionMode: config.defaultPermissionMode,
@@ -116,7 +155,7 @@ async function handlePrompt(
   const buffer: string[] = [];
   let newSessionId: string | undefined;
 
-  for await (const msg of claudeQuery({ prompt: cmd.prompt, options }) as any) {
+  for await (const msg of claudeQuery({ prompt, options }) as any) {
     if (abort.signal.aborted) break;
 
     if (msg.type === 'assistant' && msg.message?.content) {
