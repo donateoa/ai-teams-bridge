@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import * as path from 'path';
+import { config as loadDotenv } from 'dotenv';
+loadDotenv({ path: path.join(__dirname, '..', '.env') });
+
 import { Command } from 'commander';
 import { loginCommand } from './commands/login';
 import { logoutCommand } from './commands/logout';
