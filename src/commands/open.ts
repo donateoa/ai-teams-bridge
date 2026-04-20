@@ -4,16 +4,16 @@ import { getSessionId } from '../sessions';
 export async function openCommand(chatId: string): Promise<void> {
   const sessionId = getSessionId(chatId);
 
-  if (!sessionId) {
-    console.error(`Nessuna sessione attiva per la chat: ${chatId}`);
-    console.error('Usa "ai-teams-bridge sessions" per vedere le sessioni disponibili.');
-    process.exit(1);
+  const args = sessionId ? ['--resume', sessionId] : [];
+
+  if (sessionId) {
+    console.log(`Apertura sessione Claude per chat ${chatId}...`);
+    console.log(`session: ${sessionId}\n`);
+  } else {
+    console.log(`Nessuna sessione attiva per la chat ${chatId}. Avvio nuova sessione Claude...\n`);
   }
 
-  console.log(`Apertura sessione Claude per chat ${chatId}...`);
-  console.log(`session: ${sessionId}\n`);
-
-  const child = spawn('claude', ['--resume', sessionId], { stdio: 'inherit' });
+  const child = spawn('claude', args, { stdio: 'inherit' });
 
   child.on('error', (err: any) => {
     if (err.code === 'ENOENT') {

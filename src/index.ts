@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { loginCommand } from './commands/login';
 import { logoutCommand } from './commands/logout';
 import { openCommand } from './commands/open';
+import { sendCommand } from './commands/send';
 import { sessionsCommand } from './commands/sessions';
 import { startCommand } from './commands/start';
 import { statusCommand } from './commands/status';
@@ -61,6 +62,18 @@ program
   .description('Elenca le sessioni Claude attive (una per chat)')
   .action(() => {
     sessionsCommand();
+  });
+
+program
+  .command('send <chatId> <text>')
+  .description('Invia un messaggio di testo in una chat')
+  .action(async (chatId: string, text: string) => {
+    try {
+      await sendCommand(chatId, text);
+    } catch (e: any) {
+      console.error('Errore:', e.message ?? e);
+      process.exit(1);
+    }
   });
 
 program

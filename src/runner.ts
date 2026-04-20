@@ -2,6 +2,7 @@ import {
   Firestore,
   addDoc,
   collection,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -182,11 +183,15 @@ async function handlePrompt(
     await publishSystem(db, cmd, 'Comando interrotto', 'claude-system');
   }
 
-  if (newSessionId) setSessionId(cmd.chatId, newSessionId);
+  if (newSessionId) {
+    setSessionId(cmd.chatId, newSessionId);
+    await updateDoc(doc(db, 'chats', cmd.chatId), { claudeSessionId: newSessionId });
+  }
 }
 
 async function handleClear(db: Firestore, cmd: CommandDoc): Promise<void> {
   clearSessionId(cmd.chatId);
+  await updateDoc(doc(db, 'chats', cmd.chatId), { claudeSessionId: deleteField() });
   await publishSystem(db, cmd, 'Sessione Claude azzerata', 'claude-system');
 }
 
