@@ -15,7 +15,7 @@ The bridge runs in foreground on your laptop, listens to a Firestore queue for i
 
 ## Install
 
-From npm:
+[NOT PUBLISHED YET] From npm:
 
 ```bash
 npm install -g @donateoa/ai-teams-bridge
