@@ -1,14 +1,40 @@
 {
-  "name": "@agenzio/ai-teams-bridge",
+  "name": "@donateoa/ai-teams-bridge",
   "version": "0.1.0",
-  "description": "Local bridge that connects AI Teams chat to Claude Code on your machine",
+  "description": "Local bridge that connects an AI Teams web chat to Claude Code on your machine via Firebase.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "bridge",
+    "firebase",
+    "cli",
+    "ai"
+  ],
+  "homepage": "https://github.com/donateoa/ai-teams-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/donateoa/ai-teams-bridge/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/donateoa/ai-teams-bridge.git"
+  },
+  "license": "MIT",
+  "author": "Alessandro Donateo",
   "bin": {
     "ai-teams-bridge": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js start",
-    "dev": "ts-node src/index.ts"
+    "dev": "ts-node src/index.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
@@ -25,5 +51,8 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
