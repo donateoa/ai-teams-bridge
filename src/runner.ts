@@ -4,6 +4,7 @@ import {
   collection,
   deleteField,
   doc,
+  DocumentReference,
   getDoc,
   getDocs,
   increment,
@@ -11,13 +12,27 @@ import {
   query,
   runTransaction,
   serverTimestamp,
+  setDoc,
   updateDoc,
 } from 'firebase/firestore';
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk';
+import { existsSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import { BridgeConfig } from './config';
 import { getSessionId, setSessionId, clearSessionId } from './sessions';
 import { redactSecrets } from './redact';
 import { getDeviceId } from './device';
+
+function resolveWorkdir(workdir: string): string {
+  const expanded = workdir.startsWith('~')
+    ? resolve(homedir(), workdir.slice(workdir.startsWith('~/') ? 2 : 1))
+    : workdir;
+  if (!existsSync(expanded) || !statSync(expanded).isDirectory()) {
+    throw new Error(`Workdir non valido: "${workdir}" non esiste o non è una directory`);
+  }
+  return expanded;
+}
 
 interface CommandDoc {
   id: string;
@@ -97,7 +112,11 @@ async function finalizeCommand(
   activeRuns.delete(commandId);
 }
 
-async function buildContextPrompt(db: Firestore, cmd: CommandDoc): Promise<string> {
+function stripClaudePrefix(text: string): string {
+  return text.replace(/^\/claude\b\s*/i, '').trim();
+}
+
+async function buildContextPrompt(db: Firestore, cmd: CommandDoc, prompt: string): Promise<string> {
   const chatSnap = await getDoc(doc(db, 'chats', cmd.chatId));
   const chat = chatSnap.data() as any;
   const title: string = chat?.title ?? cmd.chatId;
@@ -125,9 +144,9 @@ async function buildContextPrompt(db: Firestore, cmd: CommandDoc): Promise<strin
     }
   }
 
-  if (lines.length === 0) return cmd.prompt!;
+  if (lines.length === 0) return prompt;
 
-  return `Conversazione nella chat "${title}":\n\n${lines.join('\n')}\n\n---\nNuovo messaggio: ${cmd.prompt}`;
+  return `Conversazione nella chat "${title}":\n\n${lines.join('\n')}\n\n---\nNuovo messaggio: ${prompt}`;
 }
 
 async function handlePrompt(
@@ -138,47 +157,157 @@ async function handlePrompt(
   if (!cmd.prompt || !cmd.workdir) {
     throw new Error('prompt o workdir mancante');
   }
-  console.log(`[runner] prompt="${cmd.prompt.slice(0, 80)}" workdir="${cmd.workdir}"`);
+  const cleanedPrompt = stripClaudePrefix(cmd.prompt);
+  if (!cleanedPrompt) {
+    throw new Error('prompt vuoto dopo aver rimosso il prefisso /claude');
+  }
+  const workdir = resolveWorkdir(cmd.workdir);
+  console.log(`[runner] prompt="${cleanedPrompt.slice(0, 80)}" workdir="${workdir}"`);
 
-  const resumeId = getSessionId(cmd.chatId);
   const abort = new AbortController();
   activeRuns.set(cmd.id, abort);
 
-  const prompt = resumeId ? cmd.prompt : await buildContextPrompt(db, cmd);
+  let resumeId = getSessionId(cmd.chatId);
+  let attempt = 0;
+  while (true) {
+    const result = await runPromptAttempt(db, cmd, workdir, config, abort, resumeId, cleanedPrompt);
+    if (result.staleSession && !result.emittedOutput && resumeId && attempt === 0) {
+      console.log(`[runner] sessione ${resumeId} non più valida, retry da zero`);
+      clearSessionId(cmd.chatId);
+      await updateDoc(doc(db, 'chats', cmd.chatId), { claudeSessionId: deleteField() });
+      resumeId = undefined;
+      attempt++;
+      continue;
+    }
+    if (result.error) throw result.error;
+    return;
+  }
+}
 
+interface AttemptResult {
+  emittedOutput: boolean;
+  staleSession: boolean;
+  error?: Error;
+}
+
+async function runPromptAttempt(
+  db: Firestore,
+  cmd: CommandDoc,
+  workdir: string,
+  config: BridgeConfig,
+  abort: AbortController,
+  resumeId: string | undefined,
+  cleanedPrompt: string,
+): Promise<AttemptResult> {
+  const prompt = resumeId ? cleanedPrompt : await buildContextPrompt(db, cmd, cleanedPrompt);
+
+  let stderrText = '';
   const options: Record<string, unknown> = {
-    cwd: cmd.workdir,
+    cwd: workdir,
     permissionMode: config.defaultPermissionMode,
     abortController: abort,
+    executable: process.execPath,
+    stderr: (line: string) => {
+      stderrText += line + '\n';
+      process.stderr.write(`[claude-code] ${line}\n`);
+    },
   };
   if (resumeId) options.resume = resumeId;
 
   const buffer: string[] = [];
   let newSessionId: string | undefined;
 
-  for await (const msg of claudeQuery({ prompt, options }) as any) {
-    if (abort.signal.aborted) break;
+  const FLUSH_INTERVAL_MS = 300;
+  let messageRef: DocumentReference | null = null;
+  let lastFlushedLength = 0;
+  let flushTimer: NodeJS.Timeout | null = null;
+  let flushChain: Promise<void> = Promise.resolve();
 
-    if (msg.type === 'assistant' && msg.message?.content) {
-      for (const c of msg.message.content) {
-        if (c.type === 'text' && typeof c.text === 'string') {
-          process.stdout.write(c.text);
-          buffer.push(c.text);
+  const ensureMessageDoc = async (): Promise<void> => {
+    if (messageRef) return;
+    const ref = doc(collection(db, `chats/${cmd.chatId}/messages`));
+    await setDoc(ref, {
+      senderUid: cmd.ownerUid,
+      text: '',
+      ts: serverTimestamp(),
+      kind: 'claude-output',
+      commandId: cmd.id,
+      streaming: true,
+    });
+    messageRef = ref;
+  };
+
+  const flushNow = async (): Promise<void> => {
+    if (!messageRef) return;
+    const currentText = buffer.join('');
+    if (currentText.length === lastFlushedLength) return;
+    lastFlushedLength = currentText.length;
+    await updateDoc(messageRef, { text: redactSecrets(currentText) });
+  };
+
+  const scheduleFlush = (): void => {
+    if (flushTimer) return;
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushChain = flushChain
+        .catch(() => undefined)
+        .then(() => flushNow())
+        .catch((err) => {
+          console.error('[runner] flush stream error', err);
+        });
+    }, FLUSH_INTERVAL_MS);
+  };
+
+  let streamError: Error | undefined;
+  try {
+    for await (const msg of claudeQuery({ prompt, options }) as any) {
+      if (abort.signal.aborted) break;
+
+      if (msg.type === 'assistant' && msg.message?.content) {
+        let appended = false;
+        for (const c of msg.message.content) {
+          if (c.type === 'text' && typeof c.text === 'string') {
+            process.stdout.write(c.text);
+            buffer.push(c.text);
+            appended = true;
+          }
+        }
+        if (appended) {
+          await ensureMessageDoc();
+          scheduleFlush();
         }
       }
+      if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
+        newSessionId = msg.session_id;
+      }
+      if (msg.type === 'result') {
+        if (msg.session_id) newSessionId = msg.session_id;
+      }
     }
-    if (msg.type === 'system' && msg.subtype === 'init' && msg.session_id) {
-      newSessionId = msg.session_id;
+  } catch (err: any) {
+    streamError = err instanceof Error ? err : new Error(String(err));
+  } finally {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
     }
-    if (msg.type === 'result') {
-      if (msg.session_id) newSessionId = msg.session_id;
-    }
+    await flushChain.catch(() => undefined);
+  }
+
+  const emittedOutput = buffer.length > 0;
+  const staleSession = /No conversation found with session ID/i.test(stderrText);
+
+  if (streamError && !emittedOutput && staleSession) {
+    return { emittedOutput, staleSession, error: streamError };
   }
 
   const fullText = buffer.join('').trim();
   if (fullText) process.stdout.write('\n');
-  if (fullText) {
-    await publishMessage(db, cmd, redactSecrets(fullText), 'claude-output');
+
+  if (messageRef) {
+    const redacted = fullText ? redactSecrets(fullText) : '';
+    await updateDoc(messageRef, { text: redacted, streaming: false });
+    await finalizeChatAfterStream(db, cmd, redacted);
   } else if (abort.signal.aborted) {
     await publishSystem(db, cmd, 'Comando interrotto', 'claude-system');
   }
@@ -187,6 +316,34 @@ async function handlePrompt(
     setSessionId(cmd.chatId, newSessionId);
     await updateDoc(doc(db, 'chats', cmd.chatId), { claudeSessionId: newSessionId });
   }
+
+  return { emittedOutput, staleSession, error: streamError };
+}
+
+async function finalizeChatAfterStream(
+  db: Firestore,
+  cmd: CommandDoc,
+  text: string,
+): Promise<void> {
+  const chatRef = doc(db, 'chats', cmd.chatId);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(chatRef);
+    if (!snap.exists()) return;
+    const chat = snap.data();
+    const unreadPatch: Record<string, any> = {};
+    for (const uid of chat.memberUids as string[]) {
+      if (uid !== cmd.ownerUid) unreadPatch[`unreadByUser.${uid}`] = increment(1);
+    }
+    tx.update(chatRef, {
+      lastMessage: {
+        text: text.slice(0, 200),
+        senderUid: cmd.ownerUid,
+        ts: serverTimestamp(),
+      },
+      updatedAt: serverTimestamp(),
+      ...unreadPatch,
+    });
+  });
 }
 
 async function handleClear(db: Firestore, cmd: CommandDoc): Promise<void> {
@@ -209,6 +366,8 @@ async function handleCompact(db: Firestore, cmd: CommandDoc): Promise<void> {
     cwd: process.cwd(),
     resume: resumeId,
     abortController: abort,
+    executable: process.execPath,
+    stderr: (line: string) => process.stderr.write(`[claude-code] ${line}\n`),
   };
 
   let newSessionId: string | undefined;
@@ -237,39 +396,6 @@ async function handleStop(db: Firestore, cmd: CommandDoc): Promise<void> {
   await updateDoc(doc(db, 'commands', cmd.id), {
     status: 'done',
     finishedAt: serverTimestamp(),
-  });
-}
-
-async function publishMessage(
-  db: Firestore,
-  cmd: CommandDoc,
-  text: string,
-  kind: 'claude-output' | 'claude-error',
-): Promise<void> {
-  const chatRef = doc(db, 'chats', cmd.chatId);
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(chatRef);
-    if (!snap.exists()) return;
-    const chat = snap.data();
-
-    const msgRef = doc(collection(db, `chats/${cmd.chatId}/messages`));
-    tx.set(msgRef, {
-      senderUid: cmd.ownerUid,
-      text,
-      ts: serverTimestamp(),
-      kind,
-      commandId: cmd.id,
-    });
-
-    const unreadPatch: Record<string, any> = {};
-    for (const uid of chat.memberUids as string[]) {
-      if (uid !== cmd.ownerUid) unreadPatch[`unreadByUser.${uid}`] = increment(1);
-    }
-    tx.update(chatRef, {
-      lastMessage: { text: text.slice(0, 200), senderUid: cmd.ownerUid, ts: serverTimestamp() },
-      updatedAt: serverTimestamp(),
-      ...unreadPatch,
-    });
   });
 }
 
